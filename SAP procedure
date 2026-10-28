@@ -1,0 +1,475 @@
+PROCEDURE "IRRBB_DATA_RETENTION_TEST_PROC"()
+LANGUAGE SQLSCRIPT
+SQL SECURITY INVOKER
+AS
+BEGIN
+
+    DECLARE V_TABLE_NAME NVARCHAR(500);
+    DECLARE V_DATE_FIELD NVARCHAR(250);
+
+    DECLARE V_DAILY INT;
+    DECLARE V_WEEKLY INT;
+    DECLARE V_MONTH_END INT;
+    DECLARE V_QUARTERLY INT;
+    DECLARE V_YEAR_END INT;
+
+    DECLARE V_CURRENT_MONTH INT;
+    DECLARE V_PREVIOUS_2_HALF_YEAR INT;
+
+    DECLARE V_SQL NVARCHAR(10000);
+    DECLARE V_CNT INT;
+
+
+    /* =========================================================
+       DYNAMIC SOURCE DATE TABLE VARIABLE
+       ========================================================= */
+
+    DECLARE V_RETENTION_DATE TABLE
+    (
+        REPORTING_DATE DATE
+    );
+
+
+    /* =========================================================
+       CONFIGURATION
+       ========================================================= */
+
+    CREATE LOCAL TEMPORARY COLUMN TABLE #CONFIG
+    (
+        TABLE_SYNONYM_NAME NVARCHAR(500),
+        DATE_FIELD NVARCHAR(250),
+        DAILY INT,
+        WEEKLY INT,
+        MONTH_END_DATA INT,
+        QUARTERLY INT,
+        YEAR_END_DATA INT,
+        CURRENT_MONTH INT,
+        PREVIOUS_2_HALF_YEAR INT
+    );
+
+
+   INSERT INTO #CONFIG
+
+SELECT
+
+    TRIM(TABLE_SYNONYM_NAME),
+
+    TRIM(DATE_FIELD),
+
+    IFNULL(DAILY, 0),
+
+    IFNULL(WEEKLY, 0),
+
+    IFNULL(MONTH_END_DATA, 0),
+
+    IFNULL(QUARTERLY, 0),
+
+ 
+
+    /* =========================================================
+
+       UPDATED SECTION
+
+       MKTIR YEAR END retention = 5 years
+
+       ========================================================= */
+
+    CASE
+
+        WHEN TRIM(TABLE_SYNONYM_NAME) IN
+
+        (
+
+            'IRRBB_MI_MKTIR_AGG_T_SYN',
+
+            'IRRBB_MI_MKTIR_AGG_STG_T_SYN'
+
+        )
+
+        THEN 5
+
+        ELSE IFNULL(YEAR_END_DATA, 0)
+
+    END,
+
+ 
+
+    IFNULL(CURRENT_MONTH, 0),
+
+    IFNULL(PREVIOUS_2_HALF_YEAR, 0)
+
+ 
+
+FROM IRRBB_MI_DATA_RET_CONFIG_TEST_T_SYN
+
+ 
+
+WHERE TRIM(TABLE_SYNONYM_NAME) IN
+
+(
+
+    'IRRBB_MI_AGG_T_SYN',
+
+    'IRRBB_MI_AGG_STG_T_SYN',
+
+    'IRRBB_MI_MKTIR_AGG_T_SYN',
+
+    'IRRBB_MI_MKTIR_AGG_STG_T_SYN'
+
+);
+
+
+
+
+
+
+    /* =========================================================
+       FINAL RETENTION DATES
+       ========================================================= */
+
+    CREATE LOCAL TEMPORARY COLUMN TABLE #RETENTION_DATES
+    (
+        TABLE_NAME NVARCHAR(500),
+        RETENTION_TYPE NVARCHAR(100),
+        REPORTING_DATE DATE
+    );
+
+
+    SELECT COUNT(*)
+    INTO V_CNT
+    FROM #CONFIG;
+
+
+    /* =========================================================
+       PROCESS EACH TABLE
+       ========================================================= */
+
+    WHILE :V_CNT > 0 DO
+
+
+        /* =====================================================
+           GET CONFIGURATION
+           ===================================================== */
+
+        SELECT
+            TABLE_SYNONYM_NAME,
+            DATE_FIELD,
+            DAILY,
+            WEEKLY,
+            MONTH_END_DATA,
+            QUARTERLY,
+            YEAR_END_DATA,
+            CURRENT_MONTH,
+            PREVIOUS_2_HALF_YEAR
+        INTO
+            V_TABLE_NAME,
+            V_DATE_FIELD,
+            V_DAILY,
+            V_WEEKLY,
+            V_MONTH_END,
+            V_QUARTERLY,
+            V_YEAR_END,
+            V_CURRENT_MONTH,
+            V_PREVIOUS_2_HALF_YEAR
+        FROM #CONFIG
+        ORDER BY TABLE_SYNONYM_NAME
+        LIMIT 1;
+
+
+        DELETE FROM #CONFIG
+        WHERE TABLE_SYNONYM_NAME = :V_TABLE_NAME;
+
+
+        /* =====================================================
+           GET REPORTING DATES
+           ===================================================== */
+
+       V_SQL =
+
+    'SELECT DISTINCT "W_REPORTING_DATE" AS REPORTING_DATE ' ||
+
+    'FROM "' ||
+
+    :V_TABLE_NAME ||
+
+    '" ' ||
+
+    'WHERE "W_REPORTING_DATE" IS NOT NULL';
+
+ 
+
+EXECUTE IMMEDIATE :V_SQL INTO V_RETENTION_DATE;
+
+
+        /* =====================================================
+           DAILY
+           ===================================================== */
+
+        IF :V_DAILY > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'DAILY',
+                X.REPORTING_DATE
+            FROM
+            (
+                SELECT
+                    R.REPORTING_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY R.REPORTING_DATE DESC
+                    ) AS RN
+                FROM :V_RETENTION_DATE R
+            ) X
+            WHERE X.RN <= :V_DAILY;
+
+        END IF;
+
+
+        /* =====================================================
+           WEEKLY FRIDAY COB
+           ===================================================== */
+
+        IF :V_WEEKLY > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'WEEKLY FRIDAY_COB',
+                X.REPORTING_DATE
+            FROM
+            (
+                SELECT
+                    R.REPORTING_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY R.REPORTING_DATE DESC
+                    ) AS RN
+                FROM :V_RETENTION_DATE R
+                WHERE WEEKDAY(R.REPORTING_DATE) = 4
+            ) X
+            WHERE X.RN <= :V_WEEKLY;
+
+        END IF;
+
+
+        /* =====================================================
+           MONTH END
+           ===================================================== */
+
+        IF :V_MONTH_END > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'MONTH END',
+                X.MONTH_END_DATE
+            FROM
+            (
+                SELECT
+                    M.MONTH_END_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY M.MONTH_END_DATE DESC
+                    ) AS RN
+                FROM
+                (
+                    SELECT
+                        MAX(R.REPORTING_DATE) AS MONTH_END_DATE
+                    FROM :V_RETENTION_DATE R
+                    GROUP BY
+                        YEAR(R.REPORTING_DATE),
+                        MONTH(R.REPORTING_DATE)
+                ) M
+            ) X
+            WHERE X.RN <= :V_MONTH_END;
+
+        END IF;
+
+
+        /* =====================================================
+           QUARTERLY
+           ===================================================== */
+
+        IF :V_QUARTERLY > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'QUARTERLY',
+                X.QUARTER_END_DATE
+            FROM
+            (
+                SELECT
+                    Q.QUARTER_END_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY Q.QUARTER_END_DATE DESC
+                    ) AS RN
+                FROM
+                (
+                    SELECT
+                        MAX(R.REPORTING_DATE) AS QUARTER_END_DATE
+                    FROM :V_RETENTION_DATE R
+                    GROUP BY
+                        YEAR(R.REPORTING_DATE),
+                        QUARTER(R.REPORTING_DATE)
+                ) Q
+            ) X
+            WHERE X.RN <= :V_QUARTERLY;
+
+        END IF;
+
+
+        /* =====================================================
+           YEAR END
+           ===================================================== */
+
+        IF :V_YEAR_END > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'YEAR END',
+                X.YEAR_END_DATE
+            FROM
+            (
+                SELECT
+                    Y.YEAR_END_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY Y.YEAR_END_DATE DESC
+                    ) AS RN
+                FROM
+                (
+                    SELECT
+                        MAX(R.REPORTING_DATE) AS YEAR_END_DATE
+                    FROM :V_RETENTION_DATE R
+                    GROUP BY
+                        YEAR(R.REPORTING_DATE)
+                ) Y
+            ) X
+            WHERE X.RN <= :V_YEAR_END;
+
+        END IF;
+
+
+        /* =====================================================
+           CURRENT MONTH
+
+           CURRENT_MONTH = 1
+           = latest available reporting date in current month
+           ===================================================== */
+
+        IF :V_CURRENT_MONTH > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'CURRENT MONTH',
+                X.REPORTING_DATE
+            FROM
+            (
+                SELECT
+                    R.REPORTING_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY R.REPORTING_DATE DESC
+                    ) AS RN
+                FROM :V_RETENTION_DATE R
+                WHERE
+                    YEAR(R.REPORTING_DATE) = YEAR(CURRENT_DATE)
+                    AND MONTH(R.REPORTING_DATE) = MONTH(CURRENT_DATE)
+            ) X
+            WHERE X.RN <= :V_CURRENT_MONTH;
+
+        END IF;
+
+
+        /* =====================================================
+           PREVIOUS 2 HALF YEARS
+
+           H1 = January to June
+           H2 = July to December
+
+           Current half-year is excluded.
+
+           Example:
+           Current date = September 2026
+
+           Current half-year = H2 2026
+
+           Previous 2 half-years:
+             H1 2026
+             H2 2025
+           ===================================================== */
+
+        IF :V_PREVIOUS_2_HALF_YEAR > 0 THEN
+
+            INSERT INTO #RETENTION_DATES
+            SELECT
+                :V_TABLE_NAME,
+                'PREVIOUS 2 HALF YEAR',
+                X.HALF_YEAR_END_DATE
+            FROM
+            (
+                SELECT
+                    H.HALF_YEAR_END_DATE,
+                    ROW_NUMBER() OVER
+                    (
+                        ORDER BY H.HALF_YEAR_END_DATE DESC
+                    ) AS RN
+                FROM
+                (
+                    SELECT
+                        MAX(R.REPORTING_DATE) AS HALF_YEAR_END_DATE
+                    FROM :V_RETENTION_DATE R
+                    GROUP BY
+                        YEAR(R.REPORTING_DATE),
+                        CASE
+                            WHEN MONTH(R.REPORTING_DATE) BETWEEN 1 AND 6
+                                THEN 1
+                            ELSE 2
+                        END
+                ) H
+                WHERE H.HALF_YEAR_END_DATE <
+                    CASE
+                        WHEN MONTH(CURRENT_DATE) BETWEEN 1 AND 6
+                            THEN TO_DATE(
+                                YEAR(CURRENT_DATE) || '-01-01'
+                            )
+                        ELSE TO_DATE(
+                            YEAR(CURRENT_DATE) || '-07-01'
+                        )
+                    END
+            ) X
+            WHERE X.RN <= :V_PREVIOUS_2_HALF_YEAR;
+
+        END IF;
+
+
+        /* =====================================================
+           NEXT CONFIGURATION RECORD
+           ===================================================== */
+
+        SELECT COUNT(*)
+        INTO V_CNT
+        FROM #CONFIG;
+
+
+    END WHILE;
+
+
+    /* =========================================================
+       FINAL OUTPUT
+       ========================================================= */
+
+    SELECT DISTINCT
+    TABLE_NAME,
+    REPORTING_DATE AS TARGET_DATE
+FROM #RETENTION_DATES
+ORDER BY
+    TABLE_NAME,
+    REPORTING_DATE DESC;
+END;
